@@ -51,10 +51,6 @@ card_flags_t CardReader::flag;
 char CardReader::filename[FILENAME_LENGTH], CardReader::longFilename[LONG_FILENAME_LENGTH];
 int8_t CardReader::autostart_index;
 
-#if ENABLED(BINARY_FILE_TRANSFER) && NUM_SERIAL > 1
-  int8_t CardReader::transfer_port_index;
-#endif
-
 // private:
 
 SdFile CardReader::root, CardReader::workDir, CardReader::workDirParents[MAX_DIR_DEPTH];
