@@ -104,9 +104,9 @@ public:
   enum class Protocol : uint8_t { CONTROL, FILE_TRANSFER };
   enum ReceiveState { PACKET_RESET, PACKET_WAIT, PACKET_HEADER, PACKET_DATA, PACKET_FOOTER,
                                      PACKET_PROCESS, PACKET_RESEND, PACKET_RESPONSE, PACKET_TIMEOUT, PACKET_ERROR };
-  enum TransmitState { IDLE, BUSY, WAITING, RETRY };
+  enum TransmitState { IDLE, BUSY, WAITING, RETRY, COMPLETE, ERROR };
 
-  struct ResponsePacket { // 5 byte minimal response packet. 
+  struct ResponsePacket { // 5 byte minimal response packet.
     union {
       struct [[gnu::packed]] {
         uint16_t token;
@@ -124,9 +124,11 @@ public:
     uint8_t packet_id = 0;
     char* payload = nullptr;
     uint16_t payload_length = 0;
+
+    uint8_t response = 0;
+    uint8_t status = 0;
+
     PacketInfo* next = nullptr;
-    // ***** uint8_t response_code
-    //       uint8_t status_code
 
     void set(uint8_t type, uint8_t protocol_id, uint8_t packet_id, char* payload, uint16_t payload_length) {
       this->type = type;
@@ -136,6 +138,8 @@ public:
       this->payload_length = payload_length;
     }
   };
+
+  PacketInfo *tx_active = nullptr;
 
   struct TxQueue {
     PacketInfo* head = nullptr;

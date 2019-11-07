@@ -88,7 +88,7 @@ void BinaryStream::receive() {
         for (size_t i = 0; i < sizeof(ResponsePacket) - sizeof(ResponsePacket::checksum); ++i) {
           rx_packet.checksum = FletchersChecksum::process(rx_packet.checksum, response.data[i]);
         }
-        
+
         if (FletchersChecksum::convert16to8(rx_packet.checksum) == response.checksum) {
           process_response();
         }
@@ -101,7 +101,7 @@ void BinaryStream::receive() {
           rx_packet.checksum = FletchersChecksum::process(rx_packet.checksum, rx_packet.header.data[i]);
           if (i == (sizeof(Packet::Header) - sizeof(Packet::Header::checksum)) - 1) rx_packet.header_checksum = FletchersChecksum::convert16to8(rx_packet.checksum);
         }
-        
+
         // checksum validated so pretty sure packet is good
         if (rx_packet.header.checksum == rx_packet.header_checksum) {
 
@@ -224,7 +224,7 @@ void BinaryStream::dispatch() {
     case Protocol::CONTROL:
       switch(rx_packet.header.packet_id) {
         case BinaryStreamControl::Packet::SYNC: {
-          transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);      
+          transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);
           // reset the connection for sync
           reset();
           send_packet(&sync_packet);
@@ -251,26 +251,13 @@ void BinaryStream::dispatch() {
   }
 }
 
-void BinaryStream::transmit_complete(uint8_t response) {
-  switch(static_cast<Protocol>(tx_packet.header.protocol_id)) {
-    case Protocol::CONTROL:
-      // handled elsewhere
-      break;
-    case Protocol::FILE_TRANSFER:
-      SDFileTransferProtocol::transmit_complete(tx_packet.header.sync, response);
-      break;
-    default:
-      SERIAL_ECHO_MSG("Unsupported Binary Protocol");
-      break;
-  }
-}
-
 uint32_t tx_timeout = 0;
 void BinaryStream::transmit_update() {
   switch (tx_stream.state) {
     case TransmitState::IDLE:
       if (tx_queue.available()) {
-        build_packet(tx_queue.pop());
+        tx_active = tx_queue.pop();
+        build_packet(tx_active);
         transmit_packet();
       }
       break;
@@ -287,39 +274,46 @@ void BinaryStream::transmit_update() {
 }
 
 void BinaryStream::process_response() {
+  if (response.sync_id != tx_stream.sync) {
+    // Syncronisation error?
+    tx_stream.state = TransmitState::IDLE;
+    SERIAL_ECHOLN("Received out of sync response");
+    return;
+  }
+
   switch (response.response) {
     case BinaryStreamControl::Packet::ACK:
-      if (response.sync_id == tx_stream.sync) {
         tx_stream.state = TransmitState::IDLE;
+        tx_active->status = TransmitState::COMPLETE;
         tx_stream.sync ++;
-        SERIAL_ECHOLN("Received ACK");
-        return;
-      }
-      SERIAL_ECHOLN("Received bad ACK");
-      // wrong packet acked? desyncronised stream error?
-      tx_stream.state = TransmitState::IDLE;
       break;
     case BinaryStreamControl::Packet::NACK:
       // packet payload corrupted retry
       SERIAL_ECHOLN("Received NACK");
+      tx_active->status = TransmitState::RETRY;
       write_packet(serial_device_id, tx_packet);
       break;
     case BinaryStreamControl::Packet::NYET:
       // remote rx buffer is full, wait and retry
+      tx_active->status = TransmitState::RETRY;
+
       tx_stream.state = TransmitState::IDLE;
       SERIAL_ECHOLN("Received NYET");
       break;
     case BinaryStreamControl::Packet::REJECT:
-      // remote does not understand this protocol 
+      // remote does not understand this protocol
+      tx_active->status = TransmitState::ERROR;
       tx_stream.state = TransmitState::IDLE;
       SERIAL_ECHOLN("Received REJECT");
       break;
     case BinaryStreamControl::Packet::ERROR:
       // transport layer error, close and resyncronise
+      tx_active->status = TransmitState::ERROR;
       tx_stream.state = TransmitState::IDLE;
       SERIAL_ECHOLN("Received ERROR");
       break;
   }
+  tx_active->response = response.response;
 }
 
 void BinaryStream::transmit_response(uint8_t response, uint8_t sync) {
@@ -349,10 +343,10 @@ uint8_t BinaryStream::transmit_packet() {
     SERIAL_ECHOLNPAIR("trying to transmit while last packet is not acked", tx_stream.state);
     return 1;
   }
-  tx_stream.state = TransmitState::BUSY;
+  tx_stream.state = tx_active->status = TransmitState::BUSY;
   write_packet(serial_device_id, tx_packet);
   tx_timeout = millis() + 1000;
-  tx_stream.state = TransmitState::WAITING;
+  tx_stream.state = tx_active->status = TransmitState::WAITING;
   return 0;
 }
 
@@ -390,7 +384,7 @@ uint8_t BinaryStream::send_packet(PacketInfo* packet_info) {
 }
 
 void BinaryStream::idle() {
-  transmit_update(); 
+  transmit_update();
 
   // Some Protocols may need periodic updates without new data
   SDFileTransferProtocol::idle();

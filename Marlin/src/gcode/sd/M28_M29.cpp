@@ -53,7 +53,6 @@ void GcodeSuite::M28() {
     // Enable binary protocol on this serial port
     // todo: asign an specific gcode for this? it still almost makes sense here
     if (binary_mode) {
-      SERIAL_ECHO_MSG("Switching to Binary Protocol");
       #if NUM_SERIAL > 1
         BinaryStream::enable(queue.port[queue.index_r]);
       #else

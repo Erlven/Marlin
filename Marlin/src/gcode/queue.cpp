@@ -321,7 +321,7 @@ void GCodeQueue::flush_and_request_resend() {
     return false
       || (MYSERIAL0.available() && !BinaryStream::enabled(0))
       #if NUM_SERIAL > 1
-        || (MYSERIAL1.available() && !BinaryStream::enabled(1)
+        || (MYSERIAL1.available() && !BinaryStream::enabled(1))
       #endif
     ;
   }

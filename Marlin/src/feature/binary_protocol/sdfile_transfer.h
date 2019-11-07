@@ -52,14 +52,14 @@ private:
     };
     struct [[gnu::packed]] QueryResponse {
       uint16_t version_major, version_minor, version_patch;
-      uint8_t compression_type, window, lookahead; 
+      uint8_t compression_type, window, lookahead;
     };
     struct [[gnu::packed]] ActionResponse {
       enum class Response : uint8_t { SUCCESS, BUSY, FAIL, IOERROR, INVALID };
       Response response;
     };
   };
-  
+
   static bool file_open(char* filename) {
     if (!dummy_transfer) {
       card.mount();
@@ -153,12 +153,6 @@ public:
     }
   }
 
-  static void transmit_complete(uint8_t sync, uint8_t response) {
-    SERIAL_ECHOLNPAIR("PFT packet: ", sync, " got response: ", response);
-    // react to failed packet transfers?
-  }
-
-  
   static void transmit_response(BinaryStream *protocol, const Packet::ActionResponse::Response response_type) {
     response_data.response = response_type;
     tx_packet.set(BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::ACTION_RESPONSE, (char*)&response_data, sizeof(response_data));
