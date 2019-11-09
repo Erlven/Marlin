@@ -58,16 +58,21 @@ private:
       enum class Response : uint8_t { SUCCESS, BUSY, FAIL, IOERROR, INVALID };
       Response response;
     };
+    template <size_t S>
+    struct [[gnu::packed]] Data {
+      uint8_t data[S];
+    };
   };
 
-  static bool file_open(char* filename) {
+  static bool file_open(char* filename, bool read = false) {
     if (!dummy_transfer) {
       card.mount();
-      card.openFile(filename, false);
+      card.openFile(filename, read);
       if (!card.isFileOpen()) return false;
     }
     transfer_active = true;
     data_waiting = 0;
+    data_transfered = 0;
     #if ENABLED(BINARY_STREAM_COMPRESSION)
       heatshrink_decoder_reset(&hsd);
     #endif
@@ -101,6 +106,11 @@ private:
     return (dummy_transfer || card.write(buffer, length) >= 0);
   }
 
+  //todo: support outbound comprssion?
+  static int16_t file_read(char* buffer, const size_t length) {
+    return card.read(buffer, length);
+  }
+
   static bool file_close() {
     if (!dummy_transfer) {
       #if ENABLED(BINARY_STREAM_COMPRESSION)
@@ -123,7 +133,8 @@ private:
   static void transfer_abort() {
     if (!dummy_transfer) {
       card.closefile();
-      card.removeFile(card.filename);
+      if (protocol_state == ACTIVE_RX_TRANSFER)
+        card.removeFile(card.filename);
       card.release();
       #if ENABLED(BINARY_STREAM_COMPRESSION)
         heatshrink_decoder_finish(&hsd);
@@ -133,30 +144,58 @@ private:
     return;
   }
 
-  enum class FileTransfer : uint8_t { QUERY, ACTION, ACTION_RESPONSE, OPEN, CLOSE, WRITE, ABORT };
+  enum FileTransfer : uint8_t { QUERY, ACTION, ACTION_RESPONSE, OPEN, CLOSE, WRITE, ABORT, REQUEST };
+  enum ProtocolState : uint8_t { IDLE, ACTIVE_RX_TRANSFER, TX_TRANSFER_SEND, TX_TRANSFER_WAIT, TX_TRANSFER_FINISH };
 
-  static size_t data_waiting, transfer_timeout, idle_timeout;
+  static size_t data_waiting, data_transfered, transfer_timeout;
+  static uint8_t protocol_state;
   static bool transfer_active, dummy_transfer, compression;
-
-  static Packet::ActionResponse response_data;
-  static Packet::QueryResponse query_data;
-  static BinaryStream::PacketInfo tx_packet;
+  static char tx_buffer[64+16];
 
 public:
 
-  static void idle() {
-    // If a transfer is interrupted and a file is left open, abort it after TIMEOUT ms
-    const millis_t ms = millis();
-    if (transfer_active && ELAPSED(ms, idle_timeout)) {
-      idle_timeout = ms + IDLE_PERIOD;
-      if (ELAPSED(ms, transfer_timeout)) transfer_abort();
+  static bool idle(BinaryStream *protocol) {
+    static BinaryStream::PacketInfo* active_packet = nullptr;
+    switch(protocol_state) {
+      case IDLE:
+        break;
+      case ACTIVE_RX_TRANSFER:
+        // If a transfer is interrupted and a file is left open, abort it after TIMEOUT ms
+        if (ELAPSED(millis(), transfer_timeout)) {
+          transfer_abort();
+          protocol_state = IDLE;
+        }
+        break;
+      case TX_TRANSFER_SEND: {
+        active_packet = new (tx_buffer) BinaryStream::PacketPacker{BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::WRITE, Packet::Data<64>{}};
+        int16_t data_read = file_read(active_packet->payload, 64);
+        if (data_read >= 0) {
+          data_transfered += active_packet->payload_length = data_read;
+          protocol->send_packet(active_packet);
+          protocol_state = data_read != 64 ? TX_TRANSFER_FINISH : TX_TRANSFER_WAIT;
+        } else {
+          abort();
+          protocol_state = IDLE;
+        }
+        break;
+      }
+      case TX_TRANSFER_WAIT:
+        if (active_packet->status == BinaryStream::TransmitState::COMPLETE) protocol_state = TX_TRANSFER_SEND;
+        break;
+      case TX_TRANSFER_FINISH:
+        if (active_packet->status == BinaryStream::TransmitState::COMPLETE) {
+          card.closefile();
+          card.release();
+          transfer_active = false;
+          protocol_state = IDLE;
+        }
+        break;
     }
+    return transfer_active;
   }
 
   static void transmit_response(BinaryStream *protocol, const Packet::ActionResponse::Response response_type) {
-    response_data.response = response_type;
-    tx_packet.set(BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::ACTION_RESPONSE, (char*)&response_data, sizeof(response_data));
-    protocol->send_packet(&tx_packet);
+    protocol->send_packet(new (tx_buffer) BinaryStream::PacketPacker{BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::ACTION_RESPONSE, Packet::ActionResponse{response_type}});
   }
 
   // is the protocol ready to receive this packet without blocking
@@ -169,13 +208,13 @@ public:
     transfer_timeout = millis() + TIMEOUT;
     switch (static_cast<FileTransfer>(packet_type)) {
       case FileTransfer::QUERY: {
+        protocol->send_packet( new (tx_buffer) BinaryStream::PacketPacker{BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::QUERY,
         #if ENABLED(BINARY_STREAM_COMPRESSION)
-            query_data = {VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 1, HEATSHRINK_STATIC_WINDOW_BITS, HEATSHRINK_STATIC_LOOKAHEAD_BITS};
+            Packet::QueryResponse{VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 1, HEATSHRINK_STATIC_WINDOW_BITS, HEATSHRINK_STATIC_LOOKAHEAD_BITS}
         #else
-            query_data = {VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0, 0, 0};
+            Packet::QueryResponse{VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH, 0, 0, 0}
         #endif
-        tx_packet.set(BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::QUERY, (char*)&query_data, sizeof(Packet::QueryResponse));
-        protocol->send_packet(&tx_packet);
+        });
         break;
       }
       case FileTransfer::OPEN:
@@ -188,6 +227,23 @@ public:
             dummy_transfer = packet.dummy_transfer();
             if (file_open(packet.filename())) {
               transmit_response(protocol, Response::SUCCESS);
+              break;
+            }
+          }
+          transmit_response(protocol, Response::FAIL);
+        }
+        break;
+      case FileTransfer::REQUEST:
+        if (transfer_active) {
+          transmit_response(protocol, Response::BUSY);
+        } else {
+          if (Packet::Open::validate(buffer, length)) {
+            auto packet = Packet::Open::decode(buffer);
+            compression = packet.compression_enabled();
+            dummy_transfer = packet.dummy_transfer();
+            if (file_open(packet.filename(), true /*reading*/)) {
+              transmit_response(protocol, Response::SUCCESS);
+              protocol_state = TX_TRANSFER_SEND;
               break;
             }
           }

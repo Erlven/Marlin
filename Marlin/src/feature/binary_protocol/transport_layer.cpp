@@ -64,7 +64,7 @@ void BinaryStream::receive() {
         rx_packet.reset();
         rx_stream.state = ReceiveState::PACKET_WAIT;
       case ReceiveState::PACKET_WAIT:
-        if (!stream_read(&rx_packet.header.data[1], 1)) { idle(); return; }  // no active packet so don't wait
+        if (!stream_read(&rx_packet.header.data[1], 1)) { if (!idle()) return; else break; }  // no active packet so don't wait
         rx_packet.packet_type = rx_packet.header.token - rx_packet.header.HEADER_TOKEN;
         // packet stream frameing (14 bit)
         if (rx_packet.packet_type > Packet::Type::DATA_FAF) {
@@ -86,19 +86,19 @@ void BinaryStream::receive() {
         rx_packet.bytes_received += stream_read((uint8_t*)response.data + rx_packet.bytes_received, sizeof(ResponsePacket) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(ResponsePacket)) break;
         for (size_t i = 0; i < sizeof(ResponsePacket) - sizeof(ResponsePacket::checksum); ++i) {
-          rx_packet.checksum = FletchersChecksum::process(rx_packet.checksum, response.data[i]);
+          rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, response.data[i]);
         }
 
         if (FletchersChecksum::convert16to8(rx_packet.checksum) == response.checksum) {
           process_response();
-        }
+        } // silently reject corrupt responses, will timeout and request resend
         rx_stream.state = ReceiveState::PACKET_RESET;
         break;
       case ReceiveState::PACKET_HEADER:
         rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.header.data + rx_packet.bytes_received, sizeof(Packet::Header) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(Packet::Header)) break;
         for (size_t i = 0; i < sizeof(Packet::Header); ++i) {
-          rx_packet.checksum = FletchersChecksum::process(rx_packet.checksum, rx_packet.header.data[i]);
+          rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, rx_packet.header.data[i]);
           if (i == (sizeof(Packet::Header) - sizeof(Packet::Header::checksum)) - 1) rx_packet.header_checksum = FletchersChecksum::convert16to8(rx_packet.checksum);
         }
 
@@ -164,7 +164,7 @@ void BinaryStream::receive() {
           size_t old_received = rx_packet.bytes_received;
           rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.buffer + rx_packet.bytes_received, rx_packet.header.size - rx_packet.bytes_received);
           for (size_t i = old_received; i < rx_packet.bytes_received; ++i) {
-            rx_packet.checksum = FletchersChecksum::process(rx_packet.checksum, rx_packet.buffer[i]);
+            rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, rx_packet.buffer[i]);
           }
           if (rx_packet.bytes_received != rx_packet.header.size) break;
         }
@@ -217,9 +217,6 @@ void BinaryStream::receive() {
 }
 
 void BinaryStream::dispatch() {
-  static BinaryStreamControl::Packet::Sync sync_response{ sizeof(rx_buffer), VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH };
-  static PacketInfo sync_packet{Packet::DATA, (uint8_t)Protocol::CONTROL, BinaryStreamControl::Packet::SYNC, (char*)&sync_response, sizeof(sync_response)};
-
   switch(static_cast<Protocol>(rx_packet.header.protocol_id)) {
     case Protocol::CONTROL:
       switch(rx_packet.header.packet_id) {
@@ -227,7 +224,7 @@ void BinaryStream::dispatch() {
           transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);
           // reset the connection for sync
           reset();
-          send_packet(&sync_packet);
+          send_packet(new (tx_buffer) BinaryStream::PacketPacker{Packet::DATA, (uint8_t)Protocol::CONTROL, BinaryStreamControl::Packet::SYNC, BinaryStreamControl::Packet::Sync{sizeof(rx_buffer), VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH }});
           break;
         }
         case BinaryStreamControl::Packet::CLOSE: // revert back to ASCII mode
@@ -331,7 +328,7 @@ void BinaryStream::transmit_response(uint8_t response, uint8_t sync) {
 
   uint16_t packet_checksum = 0;
   for( size_t i = 0; i < (sizeof(ResponsePacket) - 1); i++) {
-    packet_checksum = FletchersChecksum::process(packet_checksum, packet.data[i]);
+    packet_checksum = FletchersChecksum::update(packet_checksum, packet.data[i]);
   }
 
   packet.checksum = FletchersChecksum::convert16to8(packet_checksum);
@@ -363,16 +360,16 @@ uint8_t BinaryStream::build_packet(PacketInfo* packet_info) {
   tx_packet.header.size = packet_info->payload_length;
 
   for (size_t i = 0; i < (sizeof(Packet::Header) - sizeof(tx_packet.header.checksum)); i++) {
-    tx_packet.checksum = FletchersChecksum::process(tx_packet.checksum, tx_packet.header.data[i]);
+    tx_packet.checksum = FletchersChecksum::update(tx_packet.checksum, tx_packet.header.data[i]);
   }
   tx_packet.header.checksum = FletchersChecksum::convert16to8(tx_packet.checksum);
 
   if (packet_info->payload_length && packet_info->payload != nullptr) {
     tx_packet.buffer = (char*)packet_info->payload;
-    tx_packet.footer.checksum = FletchersChecksum::process(tx_packet.checksum, tx_packet.header.data[sizeof(Packet::Header) - 1]);
+    tx_packet.footer.checksum = FletchersChecksum::update(tx_packet.checksum, tx_packet.header.data[sizeof(Packet::Header) - 1]);
 
     for (size_t i = 0; i < packet_info->payload_length; i++) {
-      tx_packet.footer.checksum = FletchersChecksum::process(tx_packet.footer.checksum, tx_packet.buffer[i]);
+      tx_packet.footer.checksum = FletchersChecksum::update(tx_packet.footer.checksum, tx_packet.buffer[i]);
     }
   }
   return 0;
@@ -383,11 +380,12 @@ uint8_t BinaryStream::send_packet(PacketInfo* packet_info) {
   return 0;
 }
 
-void BinaryStream::idle() {
+bool BinaryStream::idle() {
   transmit_update();
 
   // Some Protocols may need periodic updates without new data
-  SDFileTransferProtocol::idle();
+  size_t busy = SDFileTransferProtocol::idle(this);
+  return busy + tx_stream.state;
 }
 
 #endif // BINARY_FILE_TRANSFER

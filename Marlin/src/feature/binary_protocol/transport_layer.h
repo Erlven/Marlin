@@ -74,7 +74,7 @@
 
 struct FletchersChecksum {
   // fletchers 16 checksum
-  static uint32_t process(uint32_t cs, uint8_t value) {
+  static uint32_t update(uint32_t cs, uint8_t value) {
     uint16_t cs_low = (((cs & 0xFF) + value) % 255);
     return ((((cs >> 8) + cs_low) % 255) << 8)  | cs_low;
   }
@@ -86,6 +86,30 @@ struct FletchersChecksum {
   }
 };
 
+// protocol interface // todo: if more protocols are added something like this will be needed instead of hardcoding them
+/*
+struct BinaryProtocol {
+  virtual void idle() = 0;
+  virtual void receive() = 0;
+  virtual char* name();
+};
+
+struct BinaryProtocolDescriptor {
+  uint8_t channel = 0;
+  BinaryProtocol* protocol = nullptr;
+};
+
+constexpr uint8_t max_protocols = 8;
+struct BinaryProtocolList {
+  BinaryProtocolDescriptor protocol_list[max_protocols];
+  uint8_t next_index = 0;
+  bool registerProtocol(uint8_t channel, BinaryProtocol* protocol) {
+    if (next_index < max_protocols) {
+      protocol_list[next_index++] = BinaryProtocolDescriptor{channel, protocol};
+    }
+  }
+};
+*/
 
 struct BinaryStreamControl {
   struct Packet {
@@ -129,17 +153,15 @@ public:
     uint8_t status = 0;
 
     PacketInfo* next = nullptr;
-
-    void set(uint8_t type, uint8_t protocol_id, uint8_t packet_id, char* payload, uint16_t payload_length) {
-      this->type = type;
-      this->protocol_id = protocol_id;
-      this->packet_id = packet_id;
-      this->payload = payload;
-      this->payload_length = payload_length;
-    }
   };
-
   PacketInfo *tx_active = nullptr;
+
+  template <typename T>
+  struct PacketPacker : public PacketInfo {
+      PacketPacker(uint8_t type, uint8_t protocol, uint8_t packet, T _payload_obj)
+        : PacketInfo{type, protocol, packet, reinterpret_cast<char*>(&payload_obj), sizeof(T), 0, 0}, payload_obj{_payload_obj} { }
+      T payload_obj;
+  };
 
   struct TxQueue {
     PacketInfo* head = nullptr;
@@ -256,7 +278,8 @@ public:
   uint8_t transmit_packet();
   uint8_t build_packet(PacketInfo* packet_info);
   uint8_t send_packet(PacketInfo* packet_info);
-  void idle();
+  bool idle();
+
 
   static void update() {
     for (size_t i = 0; i < NUM_SERIAL; ++i) {
@@ -281,6 +304,7 @@ public:
 
   uint16_t buffer_next_index;
   char rx_buffer[RX_STREAM_BUFFER_SIZE];
+  char tx_buffer[128];
   bool active;
 
   static BinaryStream port[NUM_SERIAL];
