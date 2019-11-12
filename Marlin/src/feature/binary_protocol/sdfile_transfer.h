@@ -177,7 +177,7 @@ private:
     return;
   }
 
-  enum FileTransfer : uint8_t { QUERY, ACTION, ACTION_RESPONSE, OPEN, CLOSE, WRITE, ABORT, REQUEST, LIST, CD, PWD, FILE };
+  enum FileTransfer : uint8_t { QUERY, ACTION, ACTION_RESPONSE, OPEN, CLOSE, WRITE, ABORT, REQUEST, LIST, CD, PWD, FILE, MOUNT, UNMOUNT };
   enum ProtocolState : uint8_t { IDLE, ACTIVE_RX_TRANSFER, TX_TRANSFER_SEND, TX_TRANSFER_WAIT, TX_TRANSFER_FINISH, TX_LS_NEXT, TX_LS_WAIT };
 
   static size_t data_waiting, data_transfered, transfer_timeout;
@@ -227,9 +227,21 @@ public:
         auto packet = new (tx_buffer) BinaryStream::PacketPacker{ BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::FILE, Packet::File{} };
         packet->payload_obj.data = (char *)&packet->payload_obj + sizeof(Packet::File);
         data_transfered --;
+
         card.getfilename_sorted(data_transfered);
-        strcpy(packet->payload_obj.data, card.filename);
-        packet->payload_length += strlen(card.filename);
+        #if ENABLED(LONG_FILENAME_HOST_SUPPORT)
+        // currently appears broken, long filename doesnt match? comes from deleted files
+          if(card.longFilename[0]) {
+            strcpy(packet->payload_obj.data, card.longFilename);
+            packet->payload_length += strlen(card.longFilename);
+          } else {
+            strcpy(packet->payload_obj.data, card.filename);
+            packet->payload_length += strlen(card.filename);
+          }
+        #else
+          strcpy(packet->payload_obj.data, card.filename);
+          packet->payload_length += strlen(card.filename);
+        #endif
 
         packet->payload_obj.meta_data = !card.flag.filenameIsDir;
         packet->payload_obj.index = data_transfered;
@@ -293,6 +305,28 @@ public:
         });
         break;
       }
+      case FileTransfer::MOUNT:
+        if (transfer_active) {
+          transmit_response(protocol, Response::BUSY);
+          break;
+        }
+        card.mount();
+        if (card.isMounted())
+          transmit_response(protocol, Response::SUCCESS);
+        else
+          transmit_response(protocol, Response::IOERROR);
+        break;
+      case FileTransfer::UNMOUNT:
+        if (transfer_active) {
+          transmit_response(protocol, Response::BUSY);
+          break;
+        }
+        card.release();
+        if (card.isMounted())
+          transmit_response(protocol, Response::IOERROR);
+        else
+          transmit_response(protocol, Response::SUCCESS);
+        break;
       case FileTransfer::LIST: {
         if (transfer_active) {
           transmit_response(protocol, Response::BUSY);
@@ -329,9 +363,9 @@ public:
         auto packet = new (tx_buffer) BinaryStream::PacketPacker{ BinaryStream::Packet::DATA, (uint8_t)BinaryStream::Protocol::FILE_TRANSFER, (uint8_t)FileTransfer::FILE, Packet::File{} };
         packet->payload_obj.data = (char *)&packet->payload_obj + sizeof(Packet::File);
         packet->payload_obj.meta_data = Packet::File::FOLDER;
-        char* workdir_name = card.getWorkDirName();
-        strcpy(packet->payload_obj.data, workdir_name);
-        packet->payload_length += strlen(workdir_name);
+        char* workdir_filename = packet->payload_obj.data;
+        card.getAbsWorkDirName(workdir_filename);
+        packet->payload_length += strlen(workdir_filename);
         protocol->send_packet(packet);
         break;
       }

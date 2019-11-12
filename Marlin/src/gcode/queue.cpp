@@ -267,56 +267,10 @@ void GCodeQueue::enqueue_now_P(PGM_P const pgcode) {
   }
 }
 
-/**
- * Send an "ok" message to the host, indicating
- * that a command was successfully processed.
- *
- * If ADVANCED_OK is enabled also include:
- *   N<int>  Line number of the command, if any
- *   P<int>  Planner space remaining
- *   B<int>  Block queue space remaining
- */
-void GCodeQueue::ok_to_send() {
-  #if NUM_SERIAL > 1
-    const int16_t pn = port[index_r];
-    if (pn < 0) return;
-    PORT_REDIRECT(pn);                    // Reply to the serial port that sent the command
-  #endif
-  if (!send_ok[index_r]) return;
-  SERIAL_ECHOPGM(STR_OK);
-  #if ENABLED(ADVANCED_OK)
-    char* p = command_buffer[index_r];
-    if (*p == 'N') {
-      SERIAL_ECHO(' ');
-      SERIAL_ECHO(*p++);
-      while (NUMERIC_SIGNED(*p))
-        SERIAL_ECHO(*p++);
-    }
-    SERIAL_ECHOPAIR_P(SP_P_STR, int(planner.moves_free()));
-    SERIAL_ECHOPAIR(" B", int(BUFSIZE - length));
-  #endif
-  SERIAL_EOL();
-}
-
-/**
- * Send a "Resend: nnn" message to the host to
- * indicate that a command needs to be re-sent.
- */
-void GCodeQueue::flush_and_request_resend() {
-  #if NUM_SERIAL > 1
-    const int16_t pn = port[index_r];
-    if (pn < 0) return;
-    PORT_REDIRECT(pn);                    // Reply to the serial port that sent the command
-  #endif
-  SERIAL_FLUSH();
-  SERIAL_ECHOPGM(STR_RESEND);
-  SERIAL_ECHOLN(last_N + 1);
-  ok_to_send();
-}
-
 
 #if ENABLED(BINARY_FILE_TRANSFER)
-  // todo: redirect to the binarystream gcode stream protocol
+
+  // todo: redirect all serial to an ascii stream binary protocol when enabled?
   inline bool serial_data_available() {
     return false
       || (MYSERIAL0.available() && !BinaryStream::enabled(0))
@@ -335,7 +289,102 @@ void GCodeQueue::flush_and_request_resend() {
       default: return -1;
     }
   }
+
+  // todo: call appropriate function on a GcodeStream object?
+  void GCodeQueue::ok_to_send() {
+    #if NUM_SERIAL > 1
+      const int16_t pn = port[index_r];
+      if (pn < 0) return;
+      PORT_REDIRECT(pn);
+    #endif
+    if (!send_ok[index_r]) return;
+    SERIAL_ECHOPGM(STR_OK);
+    #if ENABLED(ADVANCED_OK)
+      char* p = command_buffer[index_r];
+      if (*p == 'N') {
+        SERIAL_ECHO(' ');
+        SERIAL_ECHO(*p++);
+        while (NUMERIC_SIGNED(*p))
+          SERIAL_ECHO(*p++);
+      }
+      SERIAL_ECHOPGM(" P"); SERIAL_ECHO(int(BLOCK_BUFFER_SIZE - planner.movesplanned() - 1));
+      SERIAL_ECHOPGM(" B"); SERIAL_ECHO(BUFSIZE - length);
+    #endif
+    SERIAL_EOL();
+  }
+
+  // todo: these should be useless in binary mode as the transport layer takes care of any transmission problems
+  void GCodeQueue::flush_and_request_resend() {
+    #if NUM_SERIAL > 1
+      const int16_t p = port[index_r];
+      if (p < 0) return;
+      PORT_REDIRECT(p);
+    #endif
+    SERIAL_FLUSH();
+    SERIAL_ECHOPGM(STR_RESEND);
+    SERIAL_ECHOLN(last_N + 1);
+    ok_to_send();
+  }
+  // todo: these should be useless in binary mode as the transport layer takes care of any transmission problems
+  void GCodeQueue::gcode_line_error(PGM_P const err, const int8_t port) {
+    PORT_REDIRECT(port);
+    SERIAL_ERROR_START();
+    serialprintPGM(err);
+    SERIAL_ECHOLN(last_N);
+    while (read_serial(port) != -1);           // clear out the RX buffer
+    flush_and_request_resend();
+    serial_count[port] = 0;
+  }
+
 #else
+
+  /**
+   * Send an "ok" message to the host, indicating
+   * that a command was successfully processed.
+   *
+   * If ADVANCED_OK is enabled also include:
+   *   N<int>  Line number of the command, if any
+   *   P<int>  Planner space remaining
+   *   B<int>  Block queue space remaining
+   */
+  void GCodeQueue::ok_to_send() {
+    #if NUM_SERIAL > 1
+      const int16_t pn = port[index_r];
+      if (pn < 0) return;
+      PORT_REDIRECT(pn);
+    #endif
+    if (!send_ok[index_r]) return;
+    SERIAL_ECHOPGM(STR_OK);
+    #if ENABLED(ADVANCED_OK)
+      char* p = command_buffer[index_r];
+      if (*p == 'N') {
+        SERIAL_ECHO(' ');
+        SERIAL_ECHO(*p++);
+        while (NUMERIC_SIGNED(*p))
+          SERIAL_ECHO(*p++);
+      }
+      SERIAL_ECHOPGM(" P"); SERIAL_ECHO(int(BLOCK_BUFFER_SIZE - planner.movesplanned() - 1));
+      SERIAL_ECHOPGM(" B"); SERIAL_ECHO(BUFSIZE - length);
+    #endif
+    SERIAL_EOL();
+  }
+
+  /**
+   * Send a "Resend: nnn" message to the host to
+   * indicate that a command needs to be re-sent.
+   */
+  void GCodeQueue::flush_and_request_resend() {
+    #if NUM_SERIAL > 1
+      const int16_t p = port[index_r];
+      if (p < 0) return;
+      PORT_REDIRECT(p);
+    #endif
+    SERIAL_FLUSH();
+    SERIAL_ECHOPGM(STR_RESEND);
+    SERIAL_ECHOLN(last_N + 1);
+    ok_to_send();
+  }
+
   inline bool serial_data_available() {
     return false
       || MYSERIAL0.available()
@@ -354,17 +403,17 @@ void GCodeQueue::flush_and_request_resend() {
       default: return -1;
     }
   }
-#endif
 
-void GCodeQueue::gcode_line_error(PGM_P const err, const int8_t pn) {
-  PORT_REDIRECT(pn);                      // Reply to the serial port that sent the command
-  SERIAL_ERROR_START();
-  serialprintPGM(err);
-  SERIAL_ECHOLN(last_N);
-  while (read_serial(pn) != -1);          // Clear out the RX buffer
-  flush_and_request_resend();
-  serial_count[pn] = 0;
-}
+  void GCodeQueue::gcode_line_error(PGM_P const err, const int8_t pn) {
+    PORT_REDIRECT(pn);                      // Reply to the serial port that sent the command
+    SERIAL_ERROR_START();
+    serialprintPGM(err);
+    SERIAL_ECHOLN(last_N);
+    while (read_serial(pn) != -1);          // Clear out the RX buffer
+    flush_and_request_resend();
+    serial_count[pn] = 0;
+  }
+#endif
 
 FORCE_INLINE bool is_M29(const char * const cmd) {  // matches "M29" & "M29 ", but not "M290", etc
   const char * const m29 = strstr_P(cmd, PSTR("M29"));
