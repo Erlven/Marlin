@@ -28,7 +28,7 @@
 #include "sdfile_transfer.h"
 
 char* SDFileTransferProtocol::Packet::Open::data = nullptr;
-char* SDFileTransferProtocol::Packet::CD::data = nullptr;
+char* SDFileTransferProtocol::Packet::FileCmd::data = nullptr;
 char* SDFileTransferProtocol::Packet::File::data = nullptr;
 
 size_t SDFileTransferProtocol::data_waiting, SDFileTransferProtocol::data_transfered, SDFileTransferProtocol::transfer_timeout;

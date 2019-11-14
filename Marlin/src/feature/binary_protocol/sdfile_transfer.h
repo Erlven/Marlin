@@ -43,7 +43,7 @@ private:
         return (length > sizeof(Open) && buffer[length - 1] == '\0');
       }
       static Open& decode(char* buffer) {
-        data = &buffer[2];
+        data = &buffer[sizeof(Open)];
         return *reinterpret_cast<Open*>(buffer);
       }
       bool compression_enabled() { return compression & 0x1; }
@@ -59,7 +59,7 @@ private:
         return (length > sizeof(File) && buffer[length - 1] == '\0');
       }
       static File& decode(char* buffer) {
-        data = &buffer[2];
+        data = &buffer[sizeof(File)];
         return *reinterpret_cast<File*>(buffer);
       }
       uint8_t file_id() { return index; }
@@ -69,14 +69,16 @@ private:
       static char* data;
     };
 
-    struct [[gnu::packed]] CD {
+    struct [[gnu::packed]] FileCmd {
+      enum FileCmdType : uint8_t {CD, DELETE, MKDIR, RMDIR};
       static bool validate(char* buffer, size_t length) {
-        return (length > sizeof(CD) && buffer[length - 1] == '\0');
+        return (length > sizeof(FileCmd) && buffer[length - 1] == '\0');
       }
-      static CD& decode(char* buffer) {
-        data = &buffer[0];
-        return *reinterpret_cast<CD*>(buffer);
+      static FileCmd& decode(char* buffer) {
+        data = &buffer[sizeof(FileCmd)];
+        return *reinterpret_cast<FileCmd*>(buffer);
       }
+      FileCmdType command;
       static char* filename() { return data; }
       static char* data;
     };
@@ -278,11 +280,6 @@ public:
 
   static void process(BinaryStream *protocol, uint8_t packet_type, char* buffer, const uint16_t length) {
     /*
-      basic ftp commands?
-      CD
-      PWD
-      LS
-
       DELETE
       MKDIR
       RMDIR
@@ -344,8 +341,8 @@ public:
           transmit_response(protocol, Response::BUSY);
           break;
         }
-        if (Packet::CD::validate(buffer, length)) {
-          auto packet = Packet::CD::decode(buffer);
+        if (Packet::FileCmd::validate(buffer, length)) {
+          auto packet = Packet::FileCmd::decode(buffer);
           if(!strcmp(packet.filename(), "/"))
             card.cdroot();
           else if (!strcmp(packet.filename(), ".."))

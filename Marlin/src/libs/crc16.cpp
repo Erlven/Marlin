@@ -22,6 +22,15 @@
 
 #include "crc16.h"
 
+void crc8(uint8_t *crc, const void * const data, uint8_t cnt) {
+  uint8_t *ptr = (uint8_t *)data;
+  while (cnt--) {
+    *crc = *crc ^ *ptr++;
+    for (uint8_t i = 0; i < 8; i++)
+      *crc = (uint8_t)((*crc & 0x80) ? ((*crc << 1) ^ 0x31) : (*crc << 1));
+  }
+}
+
 void crc16(uint16_t *crc, const void * const data, uint16_t cnt) {
   uint8_t *ptr = (uint8_t *)data;
   while (cnt--) {

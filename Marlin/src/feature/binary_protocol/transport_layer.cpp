@@ -20,6 +20,7 @@
  *
  */
 
+#include "../../libs/crc16.h"
 #include "../../inc/MarlinConfigPre.h"
 
 #if ENABLED(BINARY_FILE_TRANSFER)
@@ -86,6 +87,7 @@ void BinaryStream::receive() {
         rx_packet.bytes_received += stream_read((uint8_t*)response.data + rx_packet.bytes_received, sizeof(ResponsePacket) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(ResponsePacket)) break;
         for (size_t i = 0; i < sizeof(ResponsePacket) - sizeof(ResponsePacket::checksum); ++i) {
+          //crc8((uint8_t*)&rx_packet.checksum, response.data, sizeof(ResponsePacket));
           rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, response.data[i]);
         }
 
@@ -110,6 +112,16 @@ void BinaryStream::receive() {
 
             // can we actually fit the payload in the buffer
             if (rx_packet.header.size > RX_STREAM_BUFFER_SIZE) {
+              SERIAL_ECHO_MSG("Packet too large for rx buffer, sync lost");
+              SERIAL_ECHOPAIR("[" , int(rx_packet.header.data[0]),
+                              ", ", int(rx_packet.header.data[1]),
+                              ", ", int(rx_packet.header.data[2]),
+                              ", ", int(rx_packet.header.data[3]),
+                              ", ", int(rx_packet.header.data[4]),
+                              ", ", int(rx_packet.header.data[5]),
+                              ", ", int(rx_packet.header.data[6]),
+                              ", ", int(rx_packet.header.data[7]));
+              SERIAL_ECHOLN("]");
               rx_stream.state = ReceiveState::PACKET_ERROR;
               break;
             }
@@ -200,14 +212,17 @@ void BinaryStream::receive() {
           SERIAL_ECHOLNPAIR("Resend request ", int(rx_stream.retries), " packet sync: ", rx_packet.header.sync, " stream sync: ", rx_stream.sync);
           transmit_response(BinaryStreamControl::Packet::NACK, rx_stream.sync);
         }
-        else
+        else {
+          SERIAL_ECHO_MSG("Too many resend requests, Sync lost");
           rx_stream.state = ReceiveState::PACKET_ERROR;
+        }
         break;
       case ReceiveState::PACKET_TIMEOUT:
         SERIAL_ECHO_MSG("Datastream timeout");
         rx_stream.state = ReceiveState::PACKET_RESEND;
         break;
       case ReceiveState::PACKET_ERROR:
+        SERIAL_ECHO_MSG("Fatal Sync Error");
         transmit_response(BinaryStreamControl::Packet::ERROR, rx_packet.header.sync);
         reset(); // reset everything, resync required
         rx_stream.state = ReceiveState::PACKET_RESET;
