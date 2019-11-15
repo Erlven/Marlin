@@ -86,12 +86,9 @@ void BinaryStream::receive() {
       case ReceiveState::PACKET_RESPONSE:
         rx_packet.bytes_received += stream_read((uint8_t*)response.data + rx_packet.bytes_received, sizeof(ResponsePacket) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(ResponsePacket)) break;
-        for (size_t i = 0; i < sizeof(ResponsePacket) - sizeof(ResponsePacket::checksum); ++i) {
-          //crc8((uint8_t*)&rx_packet.checksum, response.data, sizeof(ResponsePacket));
-          rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, response.data[i]);
-        }
+        crc8((uint8_t*)&rx_packet.checksum, response.data, sizeof(ResponsePacket) - 1);
 
-        if (FletchersChecksum::convert16to8(rx_packet.checksum) == response.checksum) {
+        if (rx_packet.checksum == response.checksum) {
           process_response();
         } // silently reject corrupt responses, will timeout and request resend
         rx_stream.state = ReceiveState::PACKET_RESET;
@@ -99,10 +96,7 @@ void BinaryStream::receive() {
       case ReceiveState::PACKET_HEADER:
         rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.header.data + rx_packet.bytes_received, sizeof(Packet::Header) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(Packet::Header)) break;
-        for (size_t i = 0; i < sizeof(Packet::Header); ++i) {
-          rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, rx_packet.header.data[i]);
-          if (i == (sizeof(Packet::Header) - sizeof(Packet::Header::checksum)) - 1) rx_packet.header_checksum = FletchersChecksum::convert16to8(rx_packet.checksum);
-        }
+        crc8((uint8_t*)&rx_packet.header_checksum, rx_packet.header.data, sizeof(Packet::Header) - 1);
 
         // checksum validated so pretty sure packet is good
         if (rx_packet.header.checksum == rx_packet.header_checksum) {
@@ -175,11 +169,11 @@ void BinaryStream::receive() {
         {
           size_t old_received = rx_packet.bytes_received;
           rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.buffer + rx_packet.bytes_received, rx_packet.header.size - rx_packet.bytes_received);
-          for (size_t i = old_received; i < rx_packet.bytes_received; ++i) {
-            rx_packet.checksum = FletchersChecksum::update(rx_packet.checksum, rx_packet.buffer[i]);
-          }
+          //crc16(&rx_packet.checksum, rx_packet.buffer + rx_packet.bytes_received, rx_packet.bytes_received - old_received);
           if (rx_packet.bytes_received != rx_packet.header.size) break;
         }
+        crc16(&rx_packet.checksum, rx_packet.buffer, rx_packet.bytes_received);
+
         rx_stream.state = ReceiveState::PACKET_FOOTER;
         rx_packet.bytes_received = 0;
         break;
@@ -192,7 +186,7 @@ void BinaryStream::receive() {
         } else {
           // FAF packets are just ignored when corrupted
           SERIAL_ECHO_START();
-          SERIAL_ECHOLNPAIR("Packet(", rx_packet.header.sync, ") payload corrupt");
+          SERIAL_ECHOLNPAIR("Packet(", rx_packet.header.sync, ") payload corrupt (", rx_packet.checksum, ")");
           rx_stream.state = rx_packet.packet_type == Packet::DATA_FAF ? ReceiveState::PACKET_RESET : ReceiveState::PACKET_RESEND;
         }
         break;
@@ -341,12 +335,7 @@ void BinaryStream::transmit_response(uint8_t response, uint8_t sync) {
   if (rx_packet.packet_type == Packet::Type::DATA_FAF || (rx_packet.packet_type == Packet::Type::DATA_NAK && response == BinaryStreamControl::Packet::ACK)) return;
   ResponsePacket packet{Packet::Header::HEADER_TOKEN, response, sync, 0};
 
-  uint16_t packet_checksum = 0;
-  for( size_t i = 0; i < (sizeof(ResponsePacket) - 1); i++) {
-    packet_checksum = FletchersChecksum::update(packet_checksum, packet.data[i]);
-  }
-
-  packet.checksum = FletchersChecksum::convert16to8(packet_checksum);
+  crc8(&packet.checksum, packet.data, (sizeof(ResponsePacket) - 1));
   bs_write_serial(serial_device_id, (char*)packet.data, sizeof(ResponsePacket));
 }
 
@@ -373,19 +362,11 @@ uint8_t BinaryStream::build_packet(PacketInfo* packet_info) {
   tx_packet.header.protocol_id = packet_info->protocol_id;
   tx_packet.header.packet_id = packet_info->packet_id;
   tx_packet.header.size = packet_info->payload_length;
-
-  for (size_t i = 0; i < (sizeof(Packet::Header) - sizeof(tx_packet.header.checksum)); i++) {
-    tx_packet.checksum = FletchersChecksum::update(tx_packet.checksum, tx_packet.header.data[i]);
-  }
-  tx_packet.header.checksum = FletchersChecksum::convert16to8(tx_packet.checksum);
+  crc8(&tx_packet.header.checksum, tx_packet.header.data, (sizeof(Packet::Header) - sizeof(tx_packet.header.checksum)));
 
   if (packet_info->payload_length && packet_info->payload != nullptr) {
     tx_packet.buffer = (char*)packet_info->payload;
-    tx_packet.footer.checksum = FletchersChecksum::update(tx_packet.checksum, tx_packet.header.data[sizeof(Packet::Header) - 1]);
-
-    for (size_t i = 0; i < packet_info->payload_length; i++) {
-      tx_packet.footer.checksum = FletchersChecksum::update(tx_packet.footer.checksum, tx_packet.buffer[i]);
-    }
+    crc16(&tx_packet.footer.checksum, tx_packet.buffer, tx_packet.header.size);
   }
   return 0;
 }
