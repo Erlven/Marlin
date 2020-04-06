@@ -102,7 +102,11 @@ private:
   static bool file_open(char* filename, bool read = false) {
     if (!dummy_transfer) {
       card.mount();
-      card.openFile(filename, read);
+      if (read) {
+        card.openFileRead(filename);
+      } else {
+        card.openFileWrite(filename);
+      }
       if (!card.isFileOpen()) return false;
     }
     transfer_active = true;
