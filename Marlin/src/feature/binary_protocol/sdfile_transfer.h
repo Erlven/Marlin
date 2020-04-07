@@ -172,7 +172,7 @@ private:
   static void transfer_abort() {
     if (!dummy_transfer) {
       card.closefile();
-      if (protocol_state == ACTIVE_RX_TRANSFER)
+      if (protocol_state == RX_TRANSFER_ACTIVE)
         card.removeFile(card.filename);
       card.release();
       #if ENABLED(BINARY_STREAM_COMPRESSION)
@@ -184,7 +184,7 @@ private:
   }
 
   enum FileTransfer : uint8_t { QUERY, ACTION, ACTION_RESPONSE, OPEN, CLOSE, WRITE, ABORT, REQUEST, LIST, CD, PWD, FILE, MOUNT, UNMOUNT };
-  enum ProtocolState : uint8_t { IDLE, ACTIVE_RX_TRANSFER, TX_TRANSFER_SEND, TX_TRANSFER_WAIT, TX_TRANSFER_FINISH, TX_LS_NEXT, TX_LS_WAIT };
+  enum ProtocolState : uint8_t { IDLE, RX_TRANSFER_ACTIVE, TX_TRANSFER_SEND, TX_TRANSFER_WAIT, TX_TRANSFER_FINISH, TX_LS_NEXT, TX_LS_WAIT };
 
   static size_t data_waiting, data_transfered, transfer_timeout;
   static uint8_t protocol_state;
@@ -198,7 +198,7 @@ public:
     switch(protocol_state) {
       case IDLE:
         break;
-      case ACTIVE_RX_TRANSFER:
+      case RX_TRANSFER_ACTIVE:
         // If a transfer is interrupted and a file is left open, abort it after TIMEOUT ms
         if (ELAPSED(millis(), transfer_timeout)) {
           transfer_abort();

@@ -22,6 +22,7 @@
 #pragma once
 
 #define BINARY_STREAM_RX_BUFFER_SIZE 512
+#define BINARY_STREAM_TX_BUFFER_SIZE 128
 
 #include "../../inc/MarlinConfig.h"
 #include "../../sd/cardreader.h"
@@ -123,31 +124,6 @@ struct Checksum {
   #endif
 };
 
-// protocol interface // todo: if more protocols are added something like this will be needed instead of hardcoding them
-/*
-struct BinaryProtocol {
-  virtual void idle() = 0;
-  virtual void receive() = 0;
-  virtual char* name();
-};
-
-struct BinaryProtocolDescriptor {
-  uint8_t channel = 0;
-  BinaryProtocol* protocol = nullptr;
-};
-
-constexpr uint8_t max_protocols = 8;
-struct BinaryProtocolList {
-  BinaryProtocolDescriptor protocol_list[max_protocols];
-  uint8_t next_index = 0;
-  bool registerProtocol(uint8_t channel, BinaryProtocol* protocol) {
-    if (next_index < max_protocols) {
-      protocol_list[next_index++] = BinaryProtocolDescriptor{channel, protocol};
-    }
-  }
-};
-*/
-
 struct BinaryStreamControl {
   struct Packet {
     enum Type { ACK, NACK, NYET, REJECT, ERROR, SYNC, QUERY, CLOSE };
@@ -183,6 +159,7 @@ public:
     uint8_t type = 0;
     uint8_t protocol_id = 0;
     uint8_t packet_id = 0;
+
     char* payload = nullptr;
     uint16_t payload_length = 0;
 
@@ -195,8 +172,10 @@ public:
 
   template <typename T>
   struct PacketPacker : public PacketInfo {
-      PacketPacker(uint8_t type, uint8_t protocol, uint8_t packet, T _payload_obj)
-        : PacketInfo{type, protocol, packet, reinterpret_cast<char*>(&payload_obj), sizeof(T), 0, 0}, payload_obj{_payload_obj} { }
+      PacketPacker(uint8_t type, uint8_t protocol_id, uint8_t packet_id, T _payload_obj)
+        : PacketInfo{type, protocol_id, packet_id, reinterpret_cast<char*>(&payload_obj), sizeof(T), 0, 0}, payload_obj{_payload_obj} {
+          static_assert(sizeof(PacketPacker<T>) <= 64+16, "buffer overrun"); // todo: generalise : currently sdfile protocol tx buffer size
+        }
       T payload_obj;
   };
 
@@ -229,7 +208,7 @@ public:
       ret->next = nullptr;
       return ret;
     }
-  } tx_queue;
+  } tx_queue; //todo: should be part of the protocol?
 
   struct Packet { // 10 byte protocol overhead, ascii with checksum and line number has a minimum of 7 increasing with line
     enum Type { RESPONSE, DATA, DATA_NAK, DATA_FAF };
@@ -264,7 +243,6 @@ public:
 
     uint32_t bytes_received;
     uint16_t checksum;
-    uint8_t header_checksum;
     millis_t timeout;
     uint16_t packet_type;
 
@@ -273,7 +251,6 @@ public:
       footer.reset();
       bytes_received = 0;
       checksum = 0;
-      header_checksum = 0;
       timeout = millis() + PACKET_MAX_WAIT;
       buffer = nullptr;
     }
@@ -315,6 +292,7 @@ public:
   uint8_t transmit_packet();
   uint8_t build_packet(PacketInfo* packet_info);
   uint8_t send_packet(PacketInfo* packet_info);
+  void write_packet(Packet& packet);
   bool idle();
 
 
@@ -335,14 +313,67 @@ public:
     port[port_id].active = false;
   }
 
-  static const uint16_t PACKET_MAX_WAIT = 500, RX_TIMESLICE = 20, MAX_RETRIES = 0, VERSION_MAJOR = 0, VERSION_MINOR = 2, VERSION_PATCH = 0, RX_STREAM_BUFFER_SIZE = BINARY_STREAM_RX_BUFFER_SIZE;
+  static const uint16_t PACKET_MAX_WAIT = 500, RX_TIMESLICE = 20, MAX_RETRIES = 0, VERSION_MAJOR = 0, VERSION_MINOR = 2, VERSION_PATCH = 0,
+                        RX_STREAM_BUFFER_SIZE = BINARY_STREAM_RX_BUFFER_SIZE, TX_STREAM_BUFFER_SIZE = BINARY_STREAM_TX_BUFFER_SIZE;
   static uint8_t next_serial_device_id;
   const uint8_t serial_device_id;
 
   uint16_t buffer_next_index;
   char rx_buffer[RX_STREAM_BUFFER_SIZE];
-  char tx_buffer[128];
+  char tx_buffer[TX_STREAM_BUFFER_SIZE];
   bool active;
 
   static BinaryStream port[NUM_SERIAL];
 };
+
+/**
+ *
+
+struct SerialConnection {
+  static constexpr uint8_t max_protocols = 8;
+
+  struct Protocol {
+    virtual bool ready(SerialConnection* connection) = 0;
+    virtual void idle(SerialConnection* connection) = 0;
+    virtual void receive(SerialConnection* connection) = 0;
+    virtual char* name();
+
+    // tx_queue_get
+               _available
+  };
+
+  struct ProtocolDescriptor {
+    uint8_t channel = 0;
+    Protocol* protocol = nullptr;
+  };
+
+  struct ProtocolList {
+    ProtocolDescriptor protocol_list[max_protocols];
+    uint8_t protocol_map[max_protocols];
+    uint8_t next_index = 0;
+    bool registerProtocol(uint8_t channel, Protocol* protocol) {
+      if (next_index < max_protocols) {
+        protocol_map[next_index] = channel;
+        protocol_list[next_index++] = ProtocolDescriptor{channel, protocol};
+      } else {
+        return false;
+      }
+    }
+  } protocol_list{};
+
+  void update(uint8_t protocol_id) {
+    Protocol* protocol = protocol_list.protocol_list[protocol_list.protocol_map[protocol_id]].protocol;
+    if (protocol->ready(this)) {
+      protocol->idle(this);
+    }
+  }
+
+  void receive(uint8_t protocol_id) {
+    protocol_list.protocol_list[protocol_list.protocol_map[protocol_id]].protocol->receive(this);
+  }
+
+  BinaryStream data_stream{};
+
+};
+
+*/

@@ -31,11 +31,11 @@ uint8_t BinaryStream::next_serial_device_id = 0;
 BinaryStream BinaryStream::port[NUM_SERIAL]{};
 
 
-void write_packet(int8_t serial_port, BinaryStream::Packet& packet) {
-  bs_write_serial(serial_port, (char *)packet.header.data, sizeof(BinaryStream::Packet::Header));
+void BinaryStream::write_packet(Packet& packet) {
+  bs_write_serial(serial_device_id, (char *)packet.header.data, sizeof(BinaryStream::Packet::Header));
   if (packet.header.size) {
-    bs_write_serial(serial_port, (char *)(packet.buffer),  packet.header.size);
-    bs_write_serial(serial_port, (char *)(packet.footer.data), sizeof(BinaryStream::Packet::Footer));
+    bs_write_serial(serial_device_id, (char *)(packet.buffer),  packet.header.size);
+    bs_write_serial(serial_device_id, (char *)(packet.footer.data), sizeof(BinaryStream::Packet::Footer));
   }
 }
 
@@ -95,26 +95,15 @@ void BinaryStream::receive() {
       case ReceiveState::PACKET_HEADER:
         rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.header.data + rx_packet.bytes_received, sizeof(Packet::Header) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(Packet::Header)) break;
-        rx_packet.header_checksum = Checksum::crc8(0, (uint8_t *)rx_packet.header.data, sizeof(Packet::Header) - 1);
 
         // checksum validated so pretty sure packet is good
-        if (rx_packet.header.checksum == rx_packet.header_checksum) {
+        if (rx_packet.header.checksum == Checksum::crc8(0, (uint8_t *)rx_packet.header.data, sizeof(Packet::Header) - sizeof(Packet::Header::checksum))) {
 
           // Is the packet expected? FAF packets do not get flow control
           if (rx_packet.header.sync == rx_stream.sync || rx_packet.packet_type == Packet::DATA_FAF) {
 
             // can we actually fit the payload in the buffer
             if (rx_packet.header.size > RX_STREAM_BUFFER_SIZE) {
-              SERIAL_ECHO_MSG("Packet too large for rx buffer, sync lost");
-              SERIAL_ECHOPAIR("[" , int(rx_packet.header.data[0]),
-                              ", ", int(rx_packet.header.data[1]),
-                              ", ", int(rx_packet.header.data[2]),
-                              ", ", int(rx_packet.header.data[3]),
-                              ", ", int(rx_packet.header.data[4]),
-                              ", ", int(rx_packet.header.data[5]),
-                              ", ", int(rx_packet.header.data[6]),
-                              ", ", int(rx_packet.header.data[7]));
-              SERIAL_ECHOLN("]");
               rx_stream.state = ReceiveState::PACKET_ERROR;
               break;
             }
@@ -157,7 +146,7 @@ void BinaryStream::receive() {
           SERIAL_ECHO_START();
           SERIAL_ECHOLNPAIR("Packet header(", rx_packet.header.sync, "?) corrupt, ignore as in reset state");
           rx_stream.state = ReceiveState::PACKET_RESET;
-        // the packet header is corrupt request resend
+        // the packet header is corrupt request resend of the expected packet
         } else {
           SERIAL_ECHO_START();
           SERIAL_ECHOLNPAIR("Packet header(", rx_packet.header.sync, "?) corrupt");
@@ -202,8 +191,7 @@ void BinaryStream::receive() {
           SERIAL_ECHO_START();
           SERIAL_ECHOLNPAIR("Resend request ", int(rx_stream.retries), " packet sync: ", rx_packet.header.sync, " stream sync: ", rx_stream.sync);
           transmit_response(BinaryStreamControl::Packet::NACK, rx_stream.sync);
-        }
-        else {
+        } else {
           SERIAL_ECHO_MSG("Too many resend requests, Sync lost");
           rx_stream.state = ReceiveState::PACKET_ERROR;
         }
@@ -221,7 +209,9 @@ void BinaryStream::receive() {
     }
   }
 }
-
+/**
+ *  Once packets are received and validated they are dispatched to the appropriate protocol
+ */
 void BinaryStream::dispatch() {
   switch(static_cast<Protocol>(rx_packet.header.protocol_id)) {
     case Protocol::CONTROL:
@@ -241,14 +231,16 @@ void BinaryStream::dispatch() {
           transmit_response(BinaryStreamControl::Packet::REJECT, rx_packet.header.sync);
       }
       break;
+
     case Protocol::FILE_TRANSFER:
       if (SDFileTransferProtocol::process_ready(rx_packet.header.packet_id, rx_packet.header.size)) {               // if the protocol can handle packet type and the amount of data
         transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);                                 // acknoledge receipt
         SDFileTransferProtocol::process(this, rx_packet.header.packet_id, rx_packet.buffer, rx_packet.header.size); // and send payload to be processed
       } else {
-        transmit_response(BinaryStreamControl::Packet::NYET, rx_packet.header.sync);
+        transmit_response(BinaryStreamControl::Packet::NYET, rx_packet.header.sync);                                // otherwise reject packet
       }
     break;
+
     default:
       transmit_response(BinaryStreamControl::Packet::REJECT, rx_packet.header.sync);
   }
@@ -264,12 +256,12 @@ void BinaryStream::transmit_update() {
         transmit_packet();
       }
       break;
-    case TransmitState::BUSY: // todo: this may be useful for spreading a transmit over multiple update slices
+    case TransmitState::BUSY: // todo: this may be useful for spreading a transmit over multiple update slices, will require response caching
       break;
-    case TransmitState::WAITING:
+    case TransmitState::WAITING: // NYET or no response timeout
       if (millis() > tx_timeout) {
         SERIAL_ECHOLN("BinaryStream::transmit_update::WAITING: Transmit timeout (no ack) resend last packet");
-        write_packet(serial_device_id, tx_packet);
+        write_packet(tx_packet);
         tx_timeout = millis() + 1000;
       }
       break;
@@ -294,13 +286,12 @@ void BinaryStream::process_response() {
       // packet payload corrupted retry
       SERIAL_ECHOLN("Received NACK");
       tx_active->status = TransmitState::RETRY;
-      write_packet(serial_device_id, tx_packet);
+      write_packet(tx_packet);
       break;
     case BinaryStreamControl::Packet::NYET:
-      // remote rx buffer is full, wait and retry
+      // remote doesn't want this packet yet
       tx_active->status = TransmitState::RETRY;
-
-      tx_stream.state = TransmitState::IDLE;
+      tx_timeout = millis() + 100; // will resend on timeout (WAITING state)
       SERIAL_ECHOLN("Received NYET");
       break;
     case BinaryStreamControl::Packet::REJECT:
@@ -332,7 +323,7 @@ void BinaryStream::transmit_response(uint8_t response, uint8_t sync) {
   if (rx_packet.packet_type == Packet::Type::DATA_FAF || (rx_packet.packet_type == Packet::Type::DATA_NAK && response == BinaryStreamControl::Packet::ACK)) return;
   ResponsePacket packet{Packet::Header::HEADER_TOKEN, response, sync, 0};
 
-  packet.checksum = Checksum::crc8(0, (uint8_t *)packet.data, (sizeof(ResponsePacket) - 1));
+  packet.checksum = Checksum::crc8(0, (uint8_t *)packet.data, (sizeof(ResponsePacket) - sizeof(ResponsePacket::checksum)));
   bs_write_serial(serial_device_id, (char*)packet.data, sizeof(ResponsePacket));
 }
 
@@ -342,7 +333,7 @@ uint8_t BinaryStream::transmit_packet() {
     return 1;
   }
   tx_stream.state = tx_active->status = TransmitState::BUSY;
-  write_packet(serial_device_id, tx_packet);
+  write_packet(tx_packet);
   tx_timeout = millis() + 1000;
   tx_stream.state = tx_active->status = TransmitState::WAITING;
   return 0;
@@ -359,10 +350,10 @@ uint8_t BinaryStream::build_packet(PacketInfo* packet_info) {
   tx_packet.header.protocol_id = packet_info->protocol_id;
   tx_packet.header.packet_id = packet_info->packet_id;
   tx_packet.header.size = packet_info->payload_length;
-  tx_packet.header.checksum = Checksum::crc8(0, (uint8_t *)tx_packet.header.data, (sizeof(Packet::Header) - sizeof(tx_packet.header.checksum)));
+  tx_packet.header.checksum = Checksum::crc8(0, (uint8_t *)tx_packet.header.data, (sizeof(Packet::Header) - sizeof(Packet::Header::checksum)));
 
   if (packet_info->payload_length && packet_info->payload != nullptr) {
-    tx_packet.buffer = (char*)packet_info->payload;
+    tx_packet.buffer = packet_info->payload;
     tx_packet.footer.checksum = Checksum::crc16(0, (uint8_t *)tx_packet.buffer, tx_packet.header.size);
   }
   return 0;
