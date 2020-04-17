@@ -126,7 +126,7 @@ struct Checksum {
 
 struct BinaryStreamControl {
   struct Packet {
-    enum Type { ACK, NACK, NYET, REJECT, ERROR, SYNC, QUERY, CLOSE };
+    enum Type : uint8_t { ACK, NACK, NYET, REJECT, ERROR, SYNC, QUERY, CLOSE };
     struct [[gnu::packed]] Error {
       uint8_t sync, code;
     };
@@ -139,21 +139,9 @@ struct BinaryStreamControl {
 class BinaryStream {
 public:
   enum class Protocol : uint8_t { CONTROL, FILE_TRANSFER };
-  enum ReceiveState { PACKET_RESET, PACKET_WAIT, PACKET_HEADER, PACKET_DATA, PACKET_FOOTER,
+  enum ReceiveState : uint8_t { PACKET_RESET, PACKET_WAIT, PACKET_HEADER, PACKET_DATA, PACKET_FOOTER,
                                      PACKET_PROCESS, PACKET_RESEND, PACKET_RESPONSE, PACKET_TIMEOUT, PACKET_ERROR };
-  enum TransmitState { IDLE, BUSY, WAITING, RETRY, COMPLETE, ERROR };
-
-  struct ResponsePacket { // 5 byte minimal response packet.
-    union {
-      struct [[gnu::packed]] {
-        uint16_t token;
-        uint8_t response;
-        uint8_t sync_id;
-        uint8_t checksum;
-      };
-      char data[5];
-    };
-  } response;
+  enum TransmitState : uint8_t { IDLE, BUSY, WAITING, RETRY, COMPLETE, ERROR };
 
   struct PacketInfo {
     uint8_t type = 0;
@@ -213,7 +201,7 @@ public:
   struct Packet { // 10 byte protocol overhead, ascii with checksum and line number has a minimum of 7 increasing with line
     enum Type { RESPONSE, DATA, DATA_NAK, DATA_FAF };
     struct Header {
-      static constexpr uint16_t HEADER_TOKEN = 0xB5AC;
+      static constexpr uint16_t HEADER_TOKEN = 0xACB5; // transmitted little endian [B5,AC]
       union {
         struct [[gnu::packed]] {
           uint16_t token;       // packet start token
@@ -225,7 +213,7 @@ public:
         };
         uint8_t data[8];
       };
-      uint8_t packet_type() { return token & 0x3; }
+      uint8_t packet_type() { return (token >> 8) & 0x03; }
       void reset() { token = 0; sync = 0; protocol_id = 0; packet_id = 0; size = 0; checksum = 0; }
     };
 
@@ -237,7 +225,22 @@ public:
       void reset() { checksum = 0; }
     };
 
-    Header header;
+    struct Response { // 5 byte minimal response packet
+      union {
+        struct [[gnu::packed]] {
+          uint16_t token;
+          uint8_t response;
+          uint8_t sync_id;
+          uint8_t checksum;
+        };
+        char data[5];
+      };
+    };
+
+    union {
+      Header header;
+      Response response;
+    };
     char* buffer;
     Footer footer;
 
@@ -275,7 +278,6 @@ public:
   void reset() {
     rx_stream.reset();
     tx_stream.reset();
-    buffer_next_index = 0;
   }
 
   BinaryStream() : serial_device_id(next_serial_device_id++) {}
@@ -318,7 +320,6 @@ public:
   static uint8_t next_serial_device_id;
   const uint8_t serial_device_id;
 
-  uint16_t buffer_next_index;
   char rx_buffer[RX_STREAM_BUFFER_SIZE];
   char tx_buffer[TX_STREAM_BUFFER_SIZE];
   bool active;
