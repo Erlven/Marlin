@@ -30,7 +30,7 @@
 uint8_t BinaryStream::next_serial_device_id = 0;
 BinaryStream BinaryStream::port[NUM_SERIAL]{};
 
-
+// blocking serial write
 void BinaryStream::write_packet(Packet& packet) {
   bs_write_serial(serial_device_id, (char *)packet.header.data, sizeof(BinaryStream::Packet::Header));
   if (packet.header.size) {
@@ -39,12 +39,12 @@ void BinaryStream::write_packet(Packet& packet) {
   }
 }
 
+// nonblocking serial read
 size_t BinaryStream::stream_read(uint8_t* buffer, size_t length) {
   if (rx_stream.state != ReceiveState::PACKET_WAIT && ELAPSED(millis(), rx_packet.timeout)) {
     rx_stream.state = rx_stream.state == ReceiveState::PACKET_RESPONSE ? ReceiveState::PACKET_RESET : ReceiveState::PACKET_TIMEOUT;
     return -1;
   }
-  // don't block
   length = min(bs_serial_data_available(serial_device_id), length);
   size_t received = bs_read_serial(serial_device_id, (char*)buffer, length);
   if (received) rx_packet.timeout = millis() + (PACKET_MAX_WAIT);
@@ -83,12 +83,10 @@ void BinaryStream::receive() {
       case ReceiveState::PACKET_RESPONSE:
         rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.response.data + rx_packet.bytes_received, sizeof(Packet::Response) - rx_packet.bytes_received);
         if (rx_packet.bytes_received != sizeof(Packet::Response)) break;
-        rx_packet.checksum = Checksum::crc8(0, (uint8_t *)rx_packet.response.data, sizeof(Packet::Response) - sizeof(Packet::Response::checksum));
 
-        if (rx_packet.checksum == rx_packet.response.checksum) {
-          process_response();
-        } // silently reject corrupt responses, will timeout and request resend
-        rx_stream.state = ReceiveState::PACKET_RESET;
+        rx_packet.checksum = Checksum::crc8(0, (uint8_t *)rx_packet.response.data, sizeof(Packet::Response) - sizeof(Packet::Response::checksum));
+        if (rx_packet.checksum == rx_packet.response.checksum) process_response();
+        rx_stream.state = ReceiveState::PACKET_RESET; // silently reject corrupt responses, will timeout and request resend
         break;
       case ReceiveState::PACKET_HEADER:
         rx_packet.bytes_received += stream_read((uint8_t*)rx_packet.header.data + rx_packet.bytes_received, sizeof(Packet::Header) - rx_packet.bytes_received);
@@ -97,7 +95,7 @@ void BinaryStream::receive() {
         // if the header validated then we are pretty sure packet is good
         if (rx_packet.header.checksum == Checksum::crc8(0, (uint8_t *)rx_packet.header.data, sizeof(Packet::Header) - sizeof(Packet::Header::checksum))) {
 
-          // Is the packet expected? FAF packets do not get flow control
+          // is the packet expected? FAF packets do not get flow control
           if (rx_packet.header.sync == rx_stream.sync || rx_packet.packet_type == Packet::DATA_FAF) {
 
             // can we actually fit the payload in the buffer
@@ -109,13 +107,12 @@ void BinaryStream::receive() {
             rx_packet.bytes_received = 0;
             // the packet has a payload
             if (rx_packet.header.size) {
+              rx_packet.buffer = static_cast<char *>(rx_buffer); // multipacket buffering not implemented, always allocate whole receive buffer to packet
               rx_stream.state = ReceiveState::PACKET_DATA;
-              rx_packet.buffer = static_cast<char *>(rx_buffer); // multipacket buffering not implemented, always allocate whole buffer to packet
+              break;
             }
             // no payload just process it
-            else {
-              rx_stream.state = ReceiveState::PACKET_PROCESS;
-            }
+            rx_stream.state = ReceiveState::PACKET_PROCESS;
           }
           // Currently in retry state, There could be packets already rx buffered, just drop them
           else if (rx_stream.retries) {
@@ -128,12 +125,16 @@ void BinaryStream::receive() {
             transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);    // transmit acknoledge and drop the payload
             rx_stream.state = ReceiveState::PACKET_RESET;
           }
-          // This shouldnt happen, so just request resend of the expected packet to see if remote can fix it
+          // request resend of the expected packet to see if remote can fix packet stream
           else {
             SERIAL_ECHO_MSG("Datastream packet out of order");
             rx_stream.state = ReceiveState::PACKET_RESEND;
           }
         }
+        // The header was corrupted, the start token matched something but the data could be meaningless
+        // in order to speed up stream recovery we trust that the packet type is correct, sending
+        // a retry respone when necessary rather than just timeout remote.
+
         // FAF packets do not get flow control / nor feedback on corruption, just drop it
         else if (rx_packet.packet_type == Packet::DATA_FAF) {
           SERIAL_ECHO_MSG("Ignore dodgy FAF packet");
@@ -177,7 +178,6 @@ void BinaryStream::receive() {
         if (rx_packet.packet_type != Packet::DATA_FAF) rx_stream.sync ++;
         rx_stream.retries = 0;
         rx_stream.bytes += rx_packet.header.size;
-
         dispatch();
         rx_stream.state = ReceiveState::PACKET_RESET;
         break;
@@ -222,7 +222,7 @@ void BinaryStream::dispatch() {
         }
         case BinaryStreamControl::Packet::CLOSE: // revert back to ASCII mode
           transmit_response(BinaryStreamControl::Packet::ACK, rx_packet.header.sync);
-            BinaryStream::disable(serial_device_id);
+          BinaryStream::disable(serial_device_id);
           break;
         default:
           transmit_response(BinaryStreamControl::Packet::REJECT, rx_packet.header.sync);
@@ -288,7 +288,8 @@ void BinaryStream::process_response() {
     case BinaryStreamControl::Packet::NYET:
       // remote doesn't want this packet yet
       tx_active->status = TransmitState::RETRY;
-      tx_timeout = millis() + 100; // will resend on timeout (WAITING state)
+      tx_queue.push(tx_active); // return packet to queue
+      tx_stream.state = TransmitState::IDLE;
       SERIAL_ECHOLN("Received NYET");
       break;
     case BinaryStreamControl::Packet::REJECT:
