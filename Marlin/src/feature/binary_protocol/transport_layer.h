@@ -63,10 +63,10 @@
 [[gnu::always_inline]] inline size_t bs_write_serial(const uint8_t index, const char* buffer, const size_t length) {
   switch (index) {
     case 0:
-      return MYSERIAL0.write((const uint8_t*)buffer, length);
+      return MYSERIAL0.write((char*)buffer, length);
     #if NUM_SERIAL > 1
       case 1: {
-        return MYSERIAL1.write((uint8_t *)buffer, length);
+        return MYSERIAL1.write((char *)buffer, length);
     }
     #endif
   }
